@@ -1,0 +1,19 @@
+[Unit]
+Description=Roxy Power Telegram Bot (WoL + SSH poweroff)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=CHANGE_ME
+WorkingDirectory=/opt/roxy-power-bot
+EnvironmentFile=/opt/roxy-power-bot/.env
+ExecStart=/usr/bin/python3 /opt/roxy-power-bot/bot.py
+Restart=always
+RestartSec=5
+# Endurecimiento básico
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
