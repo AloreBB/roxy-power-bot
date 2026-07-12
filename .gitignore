@@ -10,3 +10,8 @@ venv/
 *.swp
 *~
 .DS_Store
+
+# notas locales con datos de red (no públicos)
+deploy.local.md
+.env.nami
+.env.local
