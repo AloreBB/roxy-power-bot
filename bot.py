@@ -81,6 +81,22 @@ def _api_url(method: str) -> str:
     return f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
 
 
+# Preferir IPv4: en muchas redes el AAAA de api.telegram.org cuelga el socket.
+_original_getaddrinfo = socket.getaddrinfo
+
+
+def _getaddrinfo_ipv4_first(host, port, family=0, type=0, proto=0, flags=0):
+    infos = _original_getaddrinfo(host, port, family, type, proto, flags)
+    if family == 0:
+        v4 = [i for i in infos if i[0] == socket.AF_INET]
+        if v4:
+            return v4 + [i for i in infos if i[0] != socket.AF_INET]
+    return infos
+
+
+socket.getaddrinfo = _getaddrinfo_ipv4_first  # type: ignore[assignment]
+
+
 # ---------------------------------------------------------------------------
 # Telegram helpers
 # ---------------------------------------------------------------------------
@@ -117,9 +133,11 @@ def send_message(chat_id: int, text: str, reply_to: int | None = None) -> None:
     payload: dict = {
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
+    # HTML solo si hay tags simples; evita fallos de parseo silenciosos
+    if "<" in text and ">" in text:
+        payload["parse_mode"] = "HTML"
     if reply_to is not None:
         payload["reply_to_message_id"] = reply_to
     try:
@@ -234,8 +252,10 @@ def help_text() -> str:
 
 
 def handle_command(user_id: int, chat_id: int, text: str, message_id: int) -> None:
+    log.info("cmd de user=%s chat=%s text=%r", user_id, chat_id, text[:80])
+
     if ALLOWED_USER_IDS and user_id not in ALLOWED_USER_IDS:
-        log.warning("Usuario no autorizado: %s", user_id)
+        log.warning("Usuario no autorizado: %s (allowlist=%s)", user_id, sorted(ALLOWED_USER_IDS))
         send_message(chat_id, "⛔ No autorizado.", reply_to=message_id)
         return
 
@@ -306,19 +326,68 @@ def validate_config() -> None:
     )
 
 
+BOT_COMMANDS = [
+    {"command": "on", "description": "Encender (Wake-on-LAN)"},
+    {"command": "off", "description": "Apagar por SSH"},
+    {"command": "status", "description": "¿Está encendida?"},
+    {"command": "help", "description": "Ayuda y lista de comandos"},
+]
+
+
+def register_bot_commands() -> None:
+    """Menú de comandos al escribir / en Telegram (como BotFather)."""
+    api_call("setMyCommands", {"commands": BOT_COMMANDS}, timeout=30)
+    log.info("Comandos del menú registrados: %s", [c["command"] for c in BOT_COMMANDS])
+
+
 def main() -> None:
     validate_config()
-    me = api_call("getMe")
-    log.info("Bot @%s listo. Ctrl+C para salir.", me.get("username"))
+
+    # Sin webhook: long polling. Si hubiera webhook, getUpdates no recibe nada.
+    try:
+        api_call("deleteWebhook", {"drop_pending_updates": False}, timeout=30)
+    except Exception:
+        log.exception("No se pudo limpiar webhook (sigo igual)")
+
+    me = None
+    for attempt in range(1, 6):
+        try:
+            me = api_call("getMe", timeout=30)
+            break
+        except Exception:
+            log.exception("getMe intento %s/5 falló", attempt)
+            time.sleep(3)
+    if not me:
+        log.error("No pude conectar con Telegram. Revisa DNS/red en este host.")
+        sys.exit(1)
+
+    try:
+        register_bot_commands()
+    except Exception:
+        log.exception("No se pudo registrar el menú de comandos (el bot sigue)")
+
+    log.info("Bot @%s listo. allowlist=%s Ctrl+C para salir.", me.get("username"), sorted(ALLOWED_USER_IDS))
 
     offset = 0
     while True:
         try:
             updates = api_call(
                 "getUpdates",
-                {"offset": offset, "timeout": POLL_TIMEOUT, "allowed_updates": ["message"]},
-                timeout=POLL_TIMEOUT + 10,
+                {
+                    "offset": offset,
+                    "timeout": POLL_TIMEOUT,
+                    "allowed_updates": ["message"],
+                },
+                timeout=POLL_TIMEOUT + 15,
             )
+        except urllib.error.HTTPError as e:
+            if e.code == 409:
+                log.error("Conflicto 409: otro proceso está haciendo getUpdates. Espero 10s…")
+                time.sleep(10)
+                continue
+            log.exception("Error en getUpdates; reintento en 5s")
+            time.sleep(5)
+            continue
         except Exception:
             log.exception("Error en getUpdates; reintento en 5s")
             time.sleep(5)
@@ -327,8 +396,19 @@ def main() -> None:
         for upd in updates:
             offset = upd["update_id"] + 1
             msg = upd.get("message") or {}
-            text = msg.get("text") or ""
+            text = (msg.get("text") or "").strip()
+            if not text:
+                continue
+            # Aceptar /cmd y /cmd@botname; si no es comando, avisar en privado
             if not text.startswith("/"):
+                user = msg.get("from") or {}
+                chat = msg.get("chat") or {}
+                if chat.get("type") == "private" and user.get("id") in ALLOWED_USER_IDS:
+                    send_message(
+                        int(chat["id"]),
+                        "Usa un comando: /on /off /status /help",
+                        reply_to=int(msg["message_id"]),
+                    )
                 continue
             user = msg.get("from") or {}
             chat = msg.get("chat") or {}

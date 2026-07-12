@@ -1,5 +1,6 @@
 .env
-.env.local
+.env.*
+!.env.example
 *.pyc
 __pycache__/
 *.egg-info/
@@ -10,8 +11,9 @@ venv/
 *.swp
 *~
 .DS_Store
+bot.log
+*.log
 
-# notas locales con datos de red (no públicos)
+# notas locales con datos de red / secretos (no públicos)
 deploy.local.md
-.env.nami
-.env.local
+*.local.md
